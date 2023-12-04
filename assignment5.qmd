@@ -1,0 +1,196 @@
+---
+title: "Assignment 5"
+subtitle: "Due at 11:59pm on November 28."
+format: pdf
+editor: visual
+---
+
+You may work in pairs or individually for this assignment. Make sure you join a group in Canvas if you are working in pairs. Turn in this assignment as an HTML or PDF file to ELMS. Make sure to include the R Markdown or Quarto file that was used to generate it. Include the GitHub link for the repository containing these files.
+
+```{r}
+# Github Repository Link: 
+
+library(censusapi)
+library(tidyverse)
+library(magrittr)
+library(factoextra)
+library(maps)
+library(ggmap)
+```
+
+## Exploring ACS Data
+
+In this notebook, we use the Census API to gather data from the American Community Survey (ACS). This requires an access key, which can be obtained here:
+
+https://api.census.go/data/key_signup.html
+
+```{r}
+
+cs_key <- ""
+
+ acs_il_c <- getCensus(name = "acs/acs5",
+                     vintage = 2016,
+                     vars = c("NAME", "B01003_001E", "B19013_001E", "B19301_001E"),
+                     region = "county:*",
+                     regionin = "state:17",
+                     key = cs_key) %>%
+             rename(pop = B01003_001E, 
+                    hh_income = B19013_001E, 
+                    income = B19301_001E)
+ head(acs_il_c)
+```
+
+Pull map data for Illinois into a data frame.
+
+```{r}
+il_map <- map_data("county", region = "illinois")
+head(il_map)
+```
+
+Join the ACS data with the map data. Not that `il_map` has a column `subregion` which includes county names. We need a corresponding variable in the ACS data to join both data sets. This needs some transformations, among which the function `tolower()` might be useful. Call the joined data `acs_map`.
+
+```{r}
+# So, we notice here that the NAME variable in the acs data is very similar to the subregion variable in the il data. The big difference is that in the name variable County, Illinois is tacked onto everything and the first letter of each county is capitalized. So, we want to use some kind of string extractor function to get rid of the unwanted part of the acs NAME variable and then transform the variable to lowercase with the tolower() function.
+
+acs_il_c$NAME <- sub(pattern= " County, Illinois", replacement="", acs_il_c$NAME)
+
+acs_il_c$NAME <- tolower(acs_il_c$NAME)
+
+# Now to rename the NAME variable to subregion
+
+names(acs_il_c)[names(acs_il_c) == "NAME"] <- "subregion"
+
+# Now for the merge:
+
+acs_map <- merge(il_map, acs_il_c)
+```
+
+After you do this, plot a map of Illinois with Counties colored by per capita income.
+
+```{r}
+#| fig.height = 6.5, fig.width = 6
+
+ggplot(acs_map) + 
+geom_polygon(aes(x = long, y = lat, group = group, fill = income))
+```
+
+## Hierarchical Clustering
+
+We want to find clusters of counties that are similar in their population, average household income and per capita income. First, clean the data so that you have the appropriate variables to use for clustering. Next, create the distance matrix of the cleaned data. This distance matrix can be used to cluster counties, e.g. using the ward method.
+
+```{r}
+# First we need to clean by creating a subset of the larger dataset that only includes the numerical variables. We would want to include long, lat, group, order, pop, hh_income, and income.
+
+acs_map_num <- acs_map[,c(2:5, 9:11)]
+
+# Creating the distance matrix for the ward method
+
+hclust_d <- dist(na.omit(acs_map_num))
+as.matrix(hclust_d)[1:10, 1:10]
+```
+
+Plot the dendrogram to find a reasonable number of clusters. Draw boxes around the clusters of your cluster solution.
+
+```{r}
+hc_ward <- hclust(hclust_d, method = "ward.D2")
+
+plot(hc_ward, main = "Ward", xlab = "", sub = "")
+
+rectangle <- rect.hclust(hc_ward, 
+            k = 6, 
+            border = "red")
+
+# We can see there are 6 red rectangles corresponding to the 6 ks we chose.
+```
+
+Visualize the county clusters on a map. For this task, create a new `acs_map` object that now also includes cluster membership as a new column. This column should be called `cluster`.
+
+```{r}
+acs_map_2 <- mutate(acs_map_num, cluster = as.factor(cutree(hc_ward, 6)))  
+
+# Make a stadia maps account and get api key.
+
+register_stadiamaps('fb771d4c-7667-4f94-8c31-c507ca0a969d')
+
+bbox <- c(left = -87.95, bottom = 41.6, right = -87.5, top = 42.05)
+map <- get_stadiamap(bbox = bbox, zoom = 13, maptype = "stamen_toner_lite")
+
+
+ggmap(map) + geom_point(data = acs_map_2, aes(x = long, y = lat, color = cluster, alpha = 0.5))
+# It appears with these dimensions around Chicago only clusters 4 (and maybe one cluster of 5) are visible. 
+```
+
+## Census Tracts
+
+For the next section we need ACS data on a census tract level. We use the same variables as before.
+
+```{r}
+acs_il_t <- getCensus(name = "acs/acs5", vintage = 2016, vars = c("NAME", "B01003_001E", "B19013_001E", "B19301_001E"), region = "tract:*", regionin = "state:17", key = cs_key) %>% mutate_all(~ifelse(.==-666666666, NA, .)) %>% rename(pop = B01003_001E, hh_income = B19013_001E, income = B19301_001E)
+
+head(acs_il_t)
+```
+
+## k-Means
+
+As before, clean our data for clustering census tracts based on population, average household income and per capita income.
+
+```{r}
+c_data <- acs_il_t[,c(2:3, 5:7)]
+
+c_data<- na.omit(c_data)
+```
+
+Since we want to use K Means in this section, we start by determining the optimal number of K that results in Clusters with low within but high between variation. Plot within cluster sums of squares for a range of K (e.g. up to 20).
+
+```{r}
+fviz_nbclust(c_data, #data set we want to use
+             kmeans, #cluster method
+             method = "wss", #method used for estimating the optimal number of clusters
+             k.max = 20)
+
+# According to the elbow rule of thumb it looks like the optimal number of clusters would be 3.
+```
+
+Run `kmeans()` for the optimal number of clusters based on the plot above.
+
+```{r}
+# Based on the previous plot we assume that a three cluster solution is adequate. Note that `nstart` can be used to try out several starting points for the clusters.
+km_1 <- kmeans(c_data, 3, nstart = 20)
+km_1
+```
+
+Find the mean population, household income and per capita income grouped by clusters. In addition, display the most frequent county that can be observed within each cluster.
+
+```{r}
+
+c_data %>%
+  mutate(cluster = km_1$cluster) %>%
+  group_by(cluster) %>%
+  summarise(mean(pop), mean(hh_income), mean(income), county =  names(table(county))[which.max(table(county))])
+
+# County 31 is the most frequent county observed in all three clusters. When checking back with the acs_il_t dataset that was present before it appears that county 31 is Kankakee County.
+```
+
+As you might have seen earlier, it's not always clear which number of clusters is the optimal choice. To automate K Means clustering, program a function based on `kmeans()` that takes K as an argument. You can fix the other arguments, e.g. such that a specific dataset is always used when calling the function.
+
+We want to utilize this function to iterate over multiple Ks (e.g., K = 2, ..., 10) and \-- each time \-- add the resulting cluster membership as a new variable to our (cleaned) original data frame (`acs_il_t`). There are multiple solutions for this task, e.g. think about the `apply` family or `for` loops.
+
+```{r}
+ex_data <- acs_il_t
+
+data_fun <- function(k) {
+for (i in k) {
+ex_data_1 <- na.omit(ex_data[,c(2:3, 5:7)])
+k_l <- kmeans(ex_data_1, i, nstart = 20)
+ex_data_1 <- cbind(ex_data_1, k_l$cluster)
+}
+  return(ex_data_1)}
+
+cluster_output <-data_fun(1:10)
+```
+
+Finally, display the first rows of the updated data set (with multiple cluster columns).
+
+```{r}
+cluster_output[1:10,]
+```
